@@ -1,12 +1,11 @@
 """
-PIPPO Backend - Final Production (Router API + Zephyr)
+PIPPO Backend - INDESTRUCTIBLE CHAT
+Auto-switches between Router/API and Models until it works.
 """
 import os
 import json
 from datetime import datetime
-from enum import Enum
-from typing import Optional, List, Dict, Any
-
+from typing import Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -14,8 +13,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import httpx
 import uvicorn
 
-app = FastAPI(title="PIPPO Orchestrator")
+app = FastAPI(title="PIPPO Chat")
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,20 +24,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CONFIGURATION ---
+# CONFIG
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 MONGO_URL = os.getenv("MONGO_URL", "")
 
-# *** CRITICAL FIX: NEW HUGGING FACE ROUTER URL ***
-HF_API_BASE = "https://router.huggingface.co/hf-inference/models/"
+# --- ROBUST MODEL CONFIG ---
+# We try these URLS in order until one works.
+# 1. New Router (Zephyr)
+# 2. Old API (Zephyr)
+# 3. New Router (Phi-3.5 - Backup)
+ENDPOINTS = [
+    {
+        "url": "https://router.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta",
+        "name": "Router (Zephyr)"
+    },
+    {
+        "url": "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta",
+        "name": "Legacy API (Zephyr)"
+    },
+    {
+        "url": "https://router.huggingface.co/models/microsoft/Phi-3.5-mini-instruct",
+        "name": "Router (Phi-3.5)"
+    }
+]
 
-# *** CRITICAL FIX: SWAPPING TO ZEPHYR (Free & Reliable) ***
-MODELS = {
-    "brain": "HuggingFaceH4/zephyr-7b-beta",
-    "image_gen": "stabilityai/stable-diffusion-2-1",
-}
-
-# --- MEMORY (Safe Mode) ---
+# --- MEMORY ---
 class SafeMemory:
     def __init__(self):
         self.client = None
@@ -46,11 +57,11 @@ class SafeMemory:
     def connect(self):
         if not MONGO_URL: return
         try:
-            self.client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+            self.client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=3000)
             self.db = self.client.get_database("pippo_db")
-            print("✅ PIPPO Connected to Cloud Memory")
+            print("✅ Memory Connected")
         except:
-            print("❌ Database Init Error")
+            print("⚠️ Memory Disabled")
 
     async def save(self, user, bot, cid):
         if self.db is None: return
@@ -59,24 +70,20 @@ class SafeMemory:
                 "conversation_id": cid,
                 "timestamp": datetime.utcnow(),
                 "user": user,
-                "pippo": bot
+                "bot": bot
             })
         except:
             pass
-            
-    async def get_history_objects(self, conversation_id: str, limit: int = 6):
-        if self.db is None: return []
+
+    async def get_context(self, cid):
+        if self.db is None: return ""
         try:
-            cursor = self.db.conversations.find({"conversation_id": conversation_id}).sort("timestamp", -1).limit(limit)
-            history_data = await cursor.to_list(length=limit)
-            history_data.reverse()
-            messages = []
-            for h in history_data:
-                messages.append(Message(role="user", content=h.get("user", "")))
-                messages.append(Message(role="assistant", content=h.get("pippo", "")))
-            return messages
+            cursor = self.db.conversations.find({"conversation_id": cid}).sort("timestamp", -1).limit(3)
+            history = await cursor.to_list(length=3)
+            history.reverse()
+            return "\n".join([f"User: {h['user']}\nAI: {h['bot']}" for h in history])
         except:
-            return []
+            return ""
 
 memory = SafeMemory()
 
@@ -84,78 +91,65 @@ memory = SafeMemory()
 async def startup():
     memory.connect()
 
-# --- DATA MODELS ---
-class Message(BaseModel):
-    content: str
-    role: str = "user"
-
+# --- CHAT LOGIC ---
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str = "default"
-    history: Optional[List[Message]] = [] 
-
-# --- BRAIN ---
-class StrategicOrchestrator:
-    def __init__(self):
-        self.client = httpx.AsyncClient(timeout=60.0)
-
-    async def _query_brain(self, prompt: str) -> str:
-        # Use the NEW Router URL
-        url = f"{HF_API_BASE}{MODELS['brain']}"
-        
-        payload = {
-            "inputs": prompt, 
-            "parameters": {"max_new_tokens": 512, "temperature": 0.7, "return_full_text": False}
-        }
-        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
-        
-        try:
-            # Print URL to logs so we can debug if it fails
-            print(f"Attempting to connect to: {url}")
-            
-            response = await self.client.post(url, json=payload, headers=headers)
-            
-            # If 200 OK, return text
-            if response.status_code == 200:
-                result = response.json()
-                if isinstance(result, list): return result[0].get("generated_text", "")
-                return str(result)
-            
-            # If 503, Model is Loading
-            if response.status_code == 503:
-                return "I'm waking up... please ask me again in 20 seconds."
-            
-            # If 404, Model Not Found on Router
-            if response.status_code == 404:
-                return f"Error: Model not found at {url}. Check HF_API_BASE."
-                
-            return f"Brain Error {response.status_code}: {response.text}"
-            
-        except Exception as e:
-            return f"Connection Error: {e}"
-
-    async def process(self, request):
-        db_history = await memory.get_history_objects(request.conversation_id)
-        full_history = db_history + (request.history or [])
-        context = "\n".join([f"{msg.role}: {msg.content}" for msg in full_history[-4:]])
-        
-        # Zephyr Prompt Format
-        prompt = f"<|system|>\nYou are PIPPO, a helpful AI.<|user|>\nContext: {context}\n\n{request.message}<|assistant|>"
-        
-        response = await self._query_brain(prompt)
-        await memory.save(request.message, response, request.conversation_id)
-        return response
-
-orchestrator = StrategicOrchestrator()
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    response = await orchestrator.process(request)
-    return {"response": response}
+    # 1. Get Context
+    context = await memory.get_context(request.conversation_id)
+    
+    # 2. Prompt Engineering
+    # We use a generic format that works for both Zephyr and Phi
+    prompt = f"<|user|>\nContext:\n{context}\n\n{request.message} <|end|>\n<|assistant|>"
+
+    # 3. Try Endpoints Loop
+    last_error = ""
+    
+    async with httpx.AsyncClient() as client:
+        for endpoint in ENDPOINTS:
+            try:
+                print(f"🔄 Trying {endpoint['name']}...")
+                headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+                payload = {
+                    "inputs": prompt, 
+                    "parameters": {"max_new_tokens": 512, "temperature": 0.7, "return_full_text": False}
+                }
+                
+                response = await client.post(endpoint['url'], json=payload, headers=headers, timeout=25.0)
+                
+                # If Loading (503), fail fast so we can try next or tell user
+                if response.status_code == 503:
+                    last_error = "Model is loading (503)"
+                    continue 
+
+                # If Success (200)
+                if response.status_code == 200:
+                    result = response.json()
+                    ai_reply = result[0].get("generated_text", "") if isinstance(result, list) else str(result)
+                    
+                    # Save & Return
+                    await memory.save(request.message, ai_reply, request.conversation_id)
+                    return {"response": ai_reply, "model": endpoint['name']}
+                
+                # If Auth Error (401), stop immediately (no point trying others)
+                if response.status_code == 401:
+                    return {"response": "Error: Invalid HF_API_TOKEN. Check Render settings."}
+
+                last_error = f"Error {response.status_code}: {response.text}"
+                
+            except Exception as e:
+                last_error = f"Connection Error: {str(e)}"
+                continue
+
+    # 4. If all failed
+    return {"response": f"All models failed. Last error: {last_error}"}
 
 @app.get("/health")
 async def health():
-    return {"status": "PIPPO is alive (Zephyr + Router)"}
+    return {"status": "Online"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
