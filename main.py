@@ -1,5 +1,5 @@
 """
-PIPPO Backend - Final Production (Zephyr Model)
+PIPPO Backend - Final Production (Router API + Zephyr)
 """
 import os
 import json
@@ -28,16 +28,16 @@ app.add_middleware(
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 MONGO_URL = os.getenv("MONGO_URL", "")
 
-# NEW ROUTER URL
+# *** CRITICAL FIX: NEW HUGGING FACE ROUTER URL ***
 HF_API_BASE = "https://router.huggingface.co/hf-inference/models/"
 
-# *** CRITICAL CHANGE: SWITCHING TO ZEPHYR (More reliable on free tier) ***
+# *** CRITICAL FIX: SWAPPING TO ZEPHYR (Free & Reliable) ***
 MODELS = {
     "brain": "HuggingFaceH4/zephyr-7b-beta",
     "image_gen": "stabilityai/stable-diffusion-2-1",
 }
 
-# --- MEMORY ---
+# --- MEMORY (Safe Mode) ---
 class SafeMemory:
     def __init__(self):
         self.client = None
@@ -84,6 +84,7 @@ memory = SafeMemory()
 async def startup():
     memory.connect()
 
+# --- DATA MODELS ---
 class Message(BaseModel):
     content: str
     role: str = "user"
@@ -93,12 +94,15 @@ class ChatRequest(BaseModel):
     conversation_id: str = "default"
     history: Optional[List[Message]] = [] 
 
+# --- BRAIN ---
 class StrategicOrchestrator:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=60.0)
 
     async def _query_brain(self, prompt: str) -> str:
+        # Use the NEW Router URL
         url = f"{HF_API_BASE}{MODELS['brain']}"
+        
         payload = {
             "inputs": prompt, 
             "parameters": {"max_new_tokens": 512, "temperature": 0.7, "return_full_text": False}
@@ -106,24 +110,24 @@ class StrategicOrchestrator:
         headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
         
         try:
+            # Print URL to logs so we can debug if it fails
+            print(f"Attempting to connect to: {url}")
+            
             response = await self.client.post(url, json=payload, headers=headers)
             
+            # If 200 OK, return text
             if response.status_code == 200:
                 result = response.json()
                 if isinstance(result, list): return result[0].get("generated_text", "")
                 return str(result)
             
-            # If 404, try Fallback URL (Old API)
-            if response.status_code == 404:
-                fallback_url = f"https://api-inference.huggingface.co/models/{MODELS['brain']}"
-                response = await self.client.post(fallback_url, json=payload, headers=headers)
-                if response.status_code == 200:
-                    result = response.json()
-                    if isinstance(result, list): return result[0].get("generated_text", "")
-                    return str(result)
-
+            # If 503, Model is Loading
             if response.status_code == 503:
-                return "I'm waking up... ask again in 20 seconds."
+                return "I'm waking up... please ask me again in 20 seconds."
+            
+            # If 404, Model Not Found on Router
+            if response.status_code == 404:
+                return f"Error: Model not found at {url}. Check HF_API_BASE."
                 
             return f"Brain Error {response.status_code}: {response.text}"
             
@@ -151,8 +155,9 @@ async def chat(request: ChatRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "PIPPO is alive (Zephyr Model)"}
+    return {"status": "PIPPO is alive (Zephyr + Router)"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+    
