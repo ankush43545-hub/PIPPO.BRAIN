@@ -19,7 +19,7 @@ logger = logging.getLogger("Pippo")
 HF_API_TOKEN = os.getenv("HF_API_TOKEN") 
 
 # Using the serverless inference endpoint for Llama 3.3 70B Instruct
-API_URL = "https://api-inference.huggingface.co/models/meta-llama/Llama-3.3-70B-Instruct"
+API_URL = "https://router.huggingface.co/models/meta-llama/Llama-3.3-70B-Instruct"
 
 app = FastAPI()
 
