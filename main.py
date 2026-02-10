@@ -455,6 +455,10 @@ orchestrator = StrategicOrchestrator()
 # ENDPOINTS
 # =====================================================
 
+@app.get("/")
+async def root():
+    return {"message": "Pippo is awake and listening! Send POST requests to /chat"}
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """Chat with Pippo"""
@@ -508,4 +512,3 @@ async def text_to_voice(text: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=config.HOST, port=config.PORT, reload=config.DEBUG_MODE)
-            
