@@ -24,7 +24,7 @@ logger = logging.getLogger("Pippo")
 class Config:
     HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
     # SWITCHED TO STANDARD ENDPOINT (More reliable)
-    HF_API_BASE = "https://api-inference.huggingface.co/models/"
+    HF_API_BASE = "https://router.huggingface.co/models/"
     
     MONGO_URL = os.getenv("MONGO_URL", "")
     MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "pippo_db")
