@@ -1,71 +1,26 @@
 """
-Pippo Backend - Final Fix
+Pippo Backend - Powered by Llama 3.3 70B
 """
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
 import httpx
 import os
 import logging
 import sys
-from motor.motor_asyncio import AsyncIOMotorClient
 
-# =====================================================
-# LOGGING
-# =====================================================
+# 1. Setup Logging
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger("Pippo")
 
-# =====================================================
-# CONFIGURATION
-# =====================================================
-class Config:
-    HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
-    # SWITCHED TO STANDARD ENDPOINT (More reliable)
-    HF_API_BASE = "https://router.huggingface.co/models/"
-    
-    MONGO_URL = os.getenv("MONGO_URL", "")
-    MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "pippo_db")
-    HOST = "0.0.0.0"
-    PORT = int(os.getenv("PORT", 8000))
+# 2. Configuration
+# We need the HF Token to access Llama 3.3
+HF_API_TOKEN = os.getenv("HF_API_TOKEN") 
 
-config = Config()
+# Using the serverless inference endpoint for Llama 3.3 70B Instruct
+API_URL = "https://api-inference.huggingface.co/models/meta-llama/Llama-3.3-70B-Instruct"
 
-# =====================================================
-# MODELS
-# =====================================================
-MODELS = {
-    "brain": "HuggingFaceH4/zephyr-7b-beta",
-    "vision": "Salesforce/blip2-opt-2.7b",
-}
-
-# =====================================================
-# DATABASE (Auto-Disable on Failure)
-# =====================================================
-class Database:
-    client = None
-    
-    @classmethod
-    async def connect(cls):
-        if not config.MONGO_URL:
-            logger.warning("⚠️ No MONGO_URL found. Running in Memory-Only mode.")
-            return
-        try:
-            cls.client = AsyncIOMotorClient(config.MONGO_URL)
-            await cls.client.admin.command('ping')
-            logger.info("✅ Connected to MongoDB")
-        except Exception as e:
-            logger.error(f"❌ MongoDB Auth Failed: {e}")
-            logger.warning("⚠️ Disabling Database to keep Pippo alive.")
-            cls.client = None 
-
-db = Database()
-
-# =====================================================
-# APP
-# =====================================================
 app = FastAPI()
 
 app.add_middleware(
@@ -78,46 +33,70 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
-    image_data: Optional[str] = None
-
-@app.on_event("startup")
-async def startup():
-    await db.connect()
 
 @app.get("/")
-async def root():
-    return {"status": "Pippo is Online", "model": MODELS["brain"]}
+def root():
+    return {
+        "status": "Online", 
+        "model": "Meta-llama/Llama-3.3-70B-Instruct",
+        "token_set": bool(HF_API_TOKEN)
+    }
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    if not config.HF_API_TOKEN:
-        raise HTTPException(500, "Missing HF_API_TOKEN in Render Environment!")
+    if not HF_API_TOKEN:
+        raise HTTPException(status_code=500, detail="Missing HF_API_TOKEN in Render Environment.")
 
-    headers = {"Authorization": f"Bearer {config.HF_API_TOKEN}"}
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
     
-    # 1. Simple Chat Logic
+    # Llama 3 specific prompt format
+    # <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are Pippo, a helpful AI assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{message}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n
+    
+    formatted_prompt = (
+        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+        f"You are Pippo, a smart and helpful AI assistant.<|eot_id|>"
+        f"<|start_header_id|>user<|end_header_id|>\n\n"
+        f"{request.message}<|eot_id|>"
+        f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+    )
+
     payload = {
-        "inputs": f"<|system|>\nYou are Pippo.<|end|>\n<|user|>\n{request.message}<|end|>\n<|assistant|>",
-        "parameters": {"max_new_tokens": 200, "return_full_text": False}
+        "inputs": formatted_prompt,
+        "parameters": {
+            "max_new_tokens": 512,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "return_full_text": False
+        }
     }
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{config.HF_API_BASE}{MODELS['brain']}",
-            json=payload,
-            headers=headers
-        )
-        
-        if response.status_code != 200:
-            # Return the EXACT error from Hugging Face so we can see it
-            return {"error": f"HF Error {response.status_code}", "details": response.text}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.post(API_URL, json=payload, headers=headers)
+            
+            if response.status_code != 200:
+                logger.error(f"HF Error: {response.status_code} - {response.text}")
+                # Check for specific Llama 3 loading error
+                if response.status_code == 503:
+                    return {"response": "I'm waking up (Model Loading). Please ask again in 20 seconds."}
+                return {"error": f"HF Error {response.status_code}", "details": response.text}
 
-        result = response.json()
-        answer = result[0]['generated_text'] if isinstance(result, list) else str(result)
-        
-        return {"response": answer}
+            result = response.json()
+            
+            # Robust parsing
+            if isinstance(result, list) and len(result) > 0:
+                return {"response": result[0].get('generated_text', "").strip()}
+            elif isinstance(result, dict) and 'generated_text' in result:
+                 return {"response": result['generated_text'].strip()}
+            else:
+                return {"response": str(result)}
+                
+        except httpx.TimeoutException:
+            return {"error": "Request timed out. Llama 70B might be too busy for the free tier right now."}
+        except Exception as e:
+            return {"error": f"System Error: {str(e)}"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=config.HOST, port=config.PORT)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
     
